@@ -1,0 +1,63 @@
+# Nginx configuration template for Blue/Green deployment with automatic failover.
+# This file is processed by envsubst in docker-compose.yml to set the active and backup pools.
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    # Define a custom log format to capture detailed information for the alert watcher.
+    # Includes time, request, status, upstream address, upstream status, request/response times,
+    # and custom X-App-Pool and X-Release-Id headers from the upstream application.
+    log_format custom_log '[$time_local] "$request" $status '
+                         '"$upstream_addr" "$upstream_status" '
+                         'rt=$request_time urt=$upstream_response_time '
+                         'pool="$upstream_http_x_app_pool" '
+                         'release="$upstream_http_x_release_id"';
+
+    # Set the access log to use the custom format and write to a shared volume.
+    access_log /var/log/nginx/access.log custom_log;
+    error_log /var/log/nginx/error.log warn; # Log errors with 'warn' level or higher
+
+    # Define the upstream backend for the application services.
+    # The 'ACTIVE_POOL' variable is substituted at runtime.
+    upstream backend {
+        # Primary server: app_${ACTIVE_POOL} with failover parameters.
+        # max_fails=2: If 2 consecutive requests fail, the server is marked down.
+        # fail_timeout=5s: After 5 seconds, Nginx will try to gracefully probe the server again.
+        server app_${ACTIVE_POOL}:3000 max_fails=2 fail_timeout=5s;
+        # Backup server: The other app pool. Traffic is sent here only if the primary fails.
+        server app_${BACKUP_POOL}:3000 backup max_fails=2 fail_timeout=5s;
+    }
+
+    # Main Nginx server block, listening on port 80 (mapped to 8080 publicly).
+    server {
+        listen 80;
+        
+        location / {
+            proxy_pass http://backend;
+            
+            # CRITICAL: Define conditions for Nginx to try the next upstream server.
+            # This ensures zero failed client requests during failover.
+            proxy_next_upstream error timeout invalid_header http_500 http_502 http_503 http_504;
+            proxy_next_upstream_tries 2; # Try the next upstream server at most once (original request + 1 retry)
+            proxy_next_upstream_timeout 4s; # Timeout for trying the next upstream server
+            
+            # Tight timeouts for quick failure detection.
+            proxy_connect_timeout 2s; # Timeout for connecting to an upstream server
+            proxy_send_timeout 2s;    # Timeout for sending a request to an upstream server
+            proxy_read_timeout 2s;    # Timeout for reading a response from an upstream server
+            
+            # Headers: Forward essential headers to the upstream application and client.
+            proxy_pass_request_headers on; # Ensure application-specific headers are passed
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            
+            # Disable buffering for immediate response and to reduce latency.
+            proxy_buffering off;
+            proxy_request_buffering off;
+        }
+    }
+}
