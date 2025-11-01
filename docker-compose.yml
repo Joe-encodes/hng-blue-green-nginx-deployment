@@ -21,7 +21,14 @@ services:
       # Nginx envsubst settings for templating the config
       - NGINX_ENVSUBST_TEMPLATE_DIR=/etc/nginx/templates
       - NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx
-    entrypoint: ["/bin/sh", "-c", "envsubst '$$ACTIVE_POOL' < /etc/nginx/templates/nginx.conf.template > /etc/nginx/nginx.conf && nginx -g 'daemon off;'"]
+    entrypoint: ["/bin/sh", "-c", "\
+        if [ \"$$\"ACTIVE_POOL\" = \"blue\" ]; then \
+          export BACKUP_POOL=\"green\"; \
+        else \
+          export BACKUP_POOL=\"blue\"; \
+        fi; \
+        envsubst '$$\ACTIVE_POOL $$\BACKUP_POOL' < /etc/nginx/templates/nginx.conf.template > /etc/nginx/nginx.conf && nginx -g 'daemon off;'\
+      "]
     depends_on:
       - app_blue # Ensure apps are up before Nginx starts
       - app_green
