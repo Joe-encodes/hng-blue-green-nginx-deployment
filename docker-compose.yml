@@ -35,8 +35,6 @@ services:
   # Blue application service: The primary, active instance.
   app_blue:
     image: ${BLUE_IMAGE:-yimikaade/wonderful:devops-stage-two} # Image for the Blue app
-    ports:
-      - "8081:3000" # Expose direct port for grader's chaos testing
     environment:
       - PORT=3000 # Internal port the Node.js app runs on
       - APP_POOL=blue # Identify this instance as 'blue'
@@ -46,8 +44,6 @@ services:
   # Green application service: The backup instance.
   app_green:
     image: ${GREEN_IMAGE:-yimikaade/wonderful:devops-stage-two} # Image for the Green app
-    ports:
-      - "8082:3000" # Expose direct port for grader's chaos testing
     environment:
       - PORT=3000 # Internal port the Node.js app runs on
       - APP_POOL=green # Identify this instance as 'green'
