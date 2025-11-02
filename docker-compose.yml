@@ -1,77 +1,79 @@
-# This Docker Compose file orchestrates a Blue/Green deployment with Nginx as a reverse proxy
-# and an Alert Watcher service for observability and Slack notifications.
-
 version: '3.8'
 
 services:
-  # Nginx service: Acts as the public entry point and handles traffic routing and failover.
   nginx:
-    image: nginx:1.25 # Using a stable Nginx image
+    image: nginx:1.25
     ports:
-      - "8080:80"  # Public entry point for Nginx
-      - "8081:8081" # Direct access to Blue app (for chaos testing by grader)
-      - "8082:8082" # Direct access to Green app (for chaos testing by grader)
+      - "8080:8080"  # Nginx should listen on 8080
+      - "8081:8081"  # Direct access to Blue
+      - "8082:8082"  # Direct access to Green
     volumes:
-      # Mount the Nginx configuration template and shared log volume
       - ./nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro
-      - nginx-logs:/var/log/nginx # Shared volume for Nginx logs, accessible by watcher
+      - nginx-logs:/var/log/nginx
     environment:
-      # ACTIVE_POOL determines which backend is primary (blue or green)
       - ACTIVE_POOL=${ACTIVE_POOL:-blue}
-      # Nginx envsubst settings for templating the config
       - NGINX_ENVSUBST_TEMPLATE_DIR=/etc/nginx/templates
       - NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx
-    entrypoint: ["/bin/sh", "-c", "\
-        if [ \"$$\"ACTIVE_POOL\" = \"blue\" ]; then \
-          export BACKUP_POOL=\"green\"; \
-        else \
-          export BACKUP_POOL=\"blue\"; \
-        fi; \
-        envsubst '$$\ACTIVE_POOL $$\BACKUP_POOL' < /etc/nginx/templates/nginx.conf.template > /etc/nginx/nginx.conf && nginx -g 'daemon off;'\
-      "]
+    command: ["/bin/sh", "-c", 
+        "envsubst '$$ACTIVE_POOL' < /etc/nginx/templates/nginx.conf.template > /etc/nginx/nginx.conf && nginx -g 'daemon off;'"]
     depends_on:
-      - app_blue # Ensure apps are up before Nginx starts
+      - app_blue
       - app_green
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80"] # Simple Nginx health check
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  app_blue:
+    image: ${BLUE_IMAGE:-yimikaade/wonderful:devops-stage-two}
+    expose:
+      - "3000"  # Expose port to other containers
+    ports:
+      - "8081:3000"  # Map host 8081 to container 3000
+    environment:
+      - PORT=3000
+      - APP_POOL=blue
+      - RELEASE_ID=${RELEASE_ID_BLUE:-blue-v1.0.0}
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/healthz"]
       interval: 10s
       timeout: 5s
       retries: 3
-    restart: unless-stopped # Ensure Nginx restarts if it fails
+      start_period: 30s
+    restart: unless-stopped
 
-  # Blue application service: The primary, active instance.
-  app_blue:
-    image: ${BLUE_IMAGE:-yimikaade/wonderful:devops-stage-two} # Image for the Blue app
-    environment:
-      - PORT=3000 # Internal port the Node.js app runs on
-      - APP_POOL=blue # Identify this instance as 'blue'
-      - RELEASE_ID=${RELEASE_ID_BLUE:-blue-v1} # Release identifier for the blue app
-    restart: unless-stopped # Ensure the app restarts if it fails
-
-  # Green application service: The backup instance.
   app_green:
-    image: ${GREEN_IMAGE:-yimikaade/wonderful:devops-stage-two} # Image for the Green app
+    image: ${GREEN_IMAGE:-yimikaade/wonderful:devops-stage-two}
+    expose:
+      - "3000"  # Expose port to other containers
+    ports:
+      - "8082:3000"  # Map host 8082 to container 3000
     environment:
-      - PORT=3000 # Internal port the Node.js app runs on
-      - APP_POOL=green # Identify this instance as 'green'
-      - RELEASE_ID=${RELEASE_ID_GREEN:-green-v1} # Release identifier for the green app
-    restart: unless-stopped # Ensure the app restarts if it fails
+      - PORT=3000
+      - APP_POOL=green
+      - RELEASE_ID=${RELEASE_ID_GREEN:-green-v1.0.0}
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
 
-  # Alert Watcher service: Tails Nginx logs and sends alerts to Slack.
   alert_watcher:
-    build: . # Build from the current directory (where Dockerfile and watcher.py are)
+    build: .
     volumes:
-      - nginx-logs:/var/log/nginx # Mount the shared log volume to read Nginx logs
+      - nginx-logs:/var/log/nginx
     environment:
-      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL} # Slack webhook URL from .env
-      - ERROR_RATE_THRESHOLD=${ERROR_RATE_THRESHOLD:-2} # Error rate threshold for alerts
-      - WINDOW_SIZE=${WINDOW_SIZE:-200} # Number of requests in the sliding window for error rate calculation
-      - ALERT_COOLDOWN_SEC=${ALERT_COOLDOWN_SEC:-300} # Cooldown period between alerts
-      - ACTIVE_POOL=${ACTIVE_POOL:-blue} # Initial active pool for watcher to track
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - ERROR_RATE_THRESHOLD=${ERROR_RATE_THRESHOLD:-2}
+      - WINDOW_SIZE=${WINDOW_SIZE:-200}
+      - ALERT_COOLDOWN_SEC=${ALERT_COOLDOWN_SEC:-300}
+      - ACTIVE_POOL=${ACTIVE_POOL:-blue}
     depends_on:
-      - nginx # Ensure Nginx is running before the watcher starts
-    restart: unless-stopped # Ensure the watcher restarts if it fails
+      - nginx
+    restart: unless-stopped
 
-# Volumes definition for sharing Nginx logs
 volumes:
-  nginx-logs: # Named volume for Nginx logs
+  nginx-logs:
