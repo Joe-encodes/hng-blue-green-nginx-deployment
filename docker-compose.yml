@@ -61,14 +61,8 @@ services:
 
   alert_watcher:
     build: .
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock  # Mount docker socket
-      - nginx-logs:/var/log/nginx
     environment:
       - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
-      - ERROR_RATE_THRESHOLD=${ERROR_RATE_THRESHOLD:-2}
-      - WINDOW_SIZE=${WINDOW_SIZE:-200}
-      - ALERT_COOLDOWN_SEC=${ALERT_COOLDOWN_SEC:-300}
       - ACTIVE_POOL=${ACTIVE_POOL:-blue}
     depends_on:
       - nginx
