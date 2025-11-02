@@ -4,9 +4,7 @@ services:
   nginx:
     image: nginx:1.25
     ports:
-      - "8080:8080"  # Nginx should listen on 8080
-      - "8081:8081"  # Direct access to Blue
-      - "8082:8082"  # Direct access to Green
+      - "8080:80"    # Only main port for Nginx load balancer
     volumes:
       - ./nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro
       - nginx-logs:/var/log/nginx
@@ -28,9 +26,9 @@ services:
   app_blue:
     image: ${BLUE_IMAGE:-yimikaade/wonderful:devops-stage-two}
     expose:
-      - "3000"  # Expose port to other containers
+      - "3000"
     ports:
-      - "8081:3000"  # Map host 8081 to container 3000
+      - "8081:3000"  # Direct access to Blue app
     environment:
       - PORT=3000
       - APP_POOL=blue
@@ -46,9 +44,9 @@ services:
   app_green:
     image: ${GREEN_IMAGE:-yimikaade/wonderful:devops-stage-two}
     expose:
-      - "3000"  # Expose port to other containers
+      - "3000"
     ports:
-      - "8082:3000"  # Map host 8082 to container 3000
+      - "8082:3000"  # Direct access to Green app
     environment:
       - PORT=3000
       - APP_POOL=green
