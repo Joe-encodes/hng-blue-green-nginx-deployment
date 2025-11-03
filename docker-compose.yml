@@ -14,10 +14,12 @@ services:
       - NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx
     command: ["/bin/sh", "-c", 
         "envsubst '$$ACTIVE_POOL' < /etc/nginx/templates/nginx.conf.template > /etc/nginx/nginx.conf && 
-         mkdir -p /var/log/nginx &&
-         touch /var/log/nginx/access.log /var/log/nginx/error.log &&
-         chmod 666 /var/log/nginx/access.log /var/log/nginx/error.log &&
-         nginx -g 'daemon off;'"]
+        # Remove symlinks and create real log files
+        rm -f /var/log/nginx/access.log /var/log/nginx/error.log &&
+        touch /var/log/nginx/access.log /var/log/nginx/error.log &&
+        chmod 666 /var/log/nginx/access.log /var/log/nginx/error.log &&
+        # Start nginx
+        nginx -g 'daemon off;'"]
     depends_on:
       - app_blue
       - app_green
@@ -36,95 +38,89 @@ services:
       sh -c "
       npm install -g http-server &&
       mkdir -p /app &&
-      echo '{
-        \"name\": \"blue-app\",
-        \"version\": \"blue-v1.0.0\",
-        \"endpoints\": {
-          \"/version\": \"GET\",
-          \"/healthz\": \"GET\", 
-          \"/chaos/start\": \"POST\",
-          \"/chaos/stop\": \"POST\"
-        }
-      }' > /app/package.json &&
-      echo 'const http = require('\''http'\'');
-      const url = require('\''url'\'');
-      
+      cat > /app/server.js << 'EOF'
+      const http = require('http');
+      const url = require('url');
+
       const port = process.env.PORT || 3000;
-      const pool = process.env.APP_POOL || '\''blue'\'';
-      const releaseId = process.env.RELEASE_ID || '\''unknown'\'';
-      
+      const pool = process.env.APP_POOL || 'blue';
+      const releaseId = process.env.RELEASE_ID || 'unknown';
+
       let chaosMode = null;
       let chaosStartTime = null;
-      
+
       const server = http.createServer((req, res) => {
         const parsedUrl = url.parse(req.url, true);
         const pathname = parsedUrl.pathname;
-        
-        res.setHeader('\''X-App-Pool'\'', pool);
-        res.setHeader('\''X-Release-Id'\'', releaseId);
-        
-        if (chaosMode === '\''error'\'') {
+
+        // Set headers
+        res.setHeader('X-App-Pool', pool);
+        res.setHeader('X-Release-Id', releaseId);
+
+        // Chaos simulation
+        if (chaosMode === 'error') {
           res.writeHead(500);
-          res.end(JSON.stringify({ error: '\''Chaos mode: 500 errors'\'' }));
+          res.end(JSON.stringify({ error: 'Chaos mode: 500 errors' }));
           return;
         }
-        
-        if (chaosMode === '\''timeout'\'') {
+
+        if (chaosMode === 'timeout') {
+          // Simulate timeout - do not respond
           return;
         }
-        
-        if (pathname === '\''/healthz'\'' && req.method === '\''GET'\'') {
+
+        // Health endpoint
+        if (pathname === '/healthz' && req.method === 'GET') {
           res.writeHead(200);
-          res.end(JSON.stringify({ status: '\''healthy'\'', pool, releaseId }));
+          res.end(JSON.stringify({ status: 'healthy', pool, releaseId }));
           return;
         }
-        
-        if (pathname === '\''/version'\'' && req.method === '\''GET'\'') {
-          res.writeHead(200, { '\''Content-Type'\'': '\''application/json'\'' });
+
+        // Version endpoint
+        if (pathname === '/version' && req.method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ 
             version: releaseId,
             pool: pool,
-            timestamp: new Date().toISOString(),
-            endpoints: {
-              '\''/version'\'': '\''GET - Service information'\'',
-              '\''/healthz'\'': '\''GET - Health check'\'',
-              '\''/chaos/start'\'': '\''POST - Start chaos testing'\'',
-              '\''/chaos/stop'\'': '\''POST - Stop chaos testing'\''
-            }
+            timestamp: new Date().toISOString()
           }));
           return;
         }
-        
-        if (pathname === '\''/chaos/start'\'' && req.method === '\''POST'\'') {
-          chaosMode = parsedUrl.query.mode || '\''error'\'';
+
+        // Chaos start endpoint
+        if (pathname === '/chaos/start' && req.method === 'POST') {
+          chaosMode = parsedUrl.query.mode || 'error';
           chaosStartTime = new Date();
           res.writeHead(200);
           res.end(JSON.stringify({ 
-            status: '\''chaos started'\'',
+            status: 'chaos started',
             mode: chaosMode,
             pool: pool
           }));
           return;
         }
-        
-        if (pathname === '\''/chaos/stop'\'' && req.method === '\''POST'\'') {
+
+        // Chaos stop endpoint
+        if (pathname === '/chaos/stop' && req.method === 'POST') {
           chaosMode = null;
           res.writeHead(200);
           res.end(JSON.stringify({ 
-            status: '\''chaos stopped'\'',
+            status: 'chaos stopped',
             pool: pool,
             duration: chaosStartTime ? new Date() - chaosStartTime : 0
           }));
           return;
         }
-        
+
+        // Default 404
         res.writeHead(404);
-        res.end(JSON.stringify({ error: '\''Not found'\'' }));
+        res.end(JSON.stringify({ error: 'Not found' }));
       });
-      
+
       server.listen(port, () => {
-        console.log(`Server running at http://localhost:${port} (${pool})`);
-      });' > /app/server.js &&
+        console.log('Server running at http://localhost:' + port + ' (' + pool + ')');
+      });
+      EOF
       node /app/server.js"
 
   app_green:
@@ -141,95 +137,89 @@ services:
       sh -c "
       npm install -g http-server &&
       mkdir -p /app &&
-      echo '{
-        \"name\": \"green-app\",
-        \"version\": \"green-v1.0.0\",
-        \"endpoints\": {
-          \"/version\": \"GET\",
-          \"/healthz\": \"GET\",
-          \"/chaos/start\": \"POST\",
-          \"/chaos/stop\": \"POST\"
-        }
-      }' > /app/package.json &&
-      echo 'const http = require('\''http'\'');
-      const url = require('\''url'\'');
-      
+      cat > /app/server.js << 'EOF'
+      const http = require('http');
+      const url = require('url');
+
       const port = process.env.PORT || 3000;
-      const pool = process.env.APP_POOL || '\''green'\'';
-      const releaseId = process.env.RELEASE_ID || '\''unknown'\'';
-      
+      const pool = process.env.APP_POOL || 'green';
+      const releaseId = process.env.RELEASE_ID || 'unknown';
+
       let chaosMode = null;
       let chaosStartTime = null;
-      
+
       const server = http.createServer((req, res) => {
         const parsedUrl = url.parse(req.url, true);
         const pathname = parsedUrl.pathname;
-        
-        res.setHeader('\''X-App-Pool'\'', pool);
-        res.setHeader('\''X-Release-Id'\'', releaseId);
-        
-        if (chaosMode === '\''error'\'') {
+
+        // Set headers
+        res.setHeader('X-App-Pool', pool);
+        res.setHeader('X-Release-Id', releaseId);
+
+        // Chaos simulation
+        if (chaosMode === 'error') {
           res.writeHead(500);
-          res.end(JSON.stringify({ error: '\''Chaos mode: 500 errors'\'' }));
+          res.end(JSON.stringify({ error: 'Chaos mode: 500 errors' }));
           return;
         }
-        
-        if (chaosMode === '\''timeout'\'') {
+
+        if (chaosMode === 'timeout') {
+          // Simulate timeout - do not respond
           return;
         }
-        
-        if (pathname === '\''/healthz'\'' && req.method === '\''GET'\'') {
+
+        // Health endpoint
+        if (pathname === '/healthz' && req.method === 'GET') {
           res.writeHead(200);
-          res.end(JSON.stringify({ status: '\''healthy'\'', pool, releaseId }));
+          res.end(JSON.stringify({ status: 'healthy', pool, releaseId }));
           return;
         }
-        
-        if (pathname === '\''/version'\'' && req.method === '\''GET'\'') {
-          res.writeHead(200, { '\''Content-Type'\'': '\''application/json'\'' });
+
+        // Version endpoint
+        if (pathname === '/version' && req.method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ 
             version: releaseId,
             pool: pool,
-            timestamp: new Date().toISOString(),
-            endpoints: {
-              '\''/version'\'': '\''GET - Service information'\'',
-              '\''/healthz'\'': '\''GET - Health check'\'',
-              '\''/chaos/start'\'': '\''POST - Start chaos testing'\'',
-              '\''/chaos/stop'\'': '\''POST - Stop chaos testing'\''
-            }
+            timestamp: new Date().toISOString()
           }));
           return;
         }
-        
-        if (pathname === '\''/chaos/start'\'' && req.method === '\''POST'\'') {
-          chaosMode = parsedUrl.query.mode || '\''error'\'';
+
+        // Chaos start endpoint
+        if (pathname === '/chaos/start' && req.method === 'POST') {
+          chaosMode = parsedUrl.query.mode || 'error';
           chaosStartTime = new Date();
           res.writeHead(200);
           res.end(JSON.stringify({ 
-            status: '\''chaos started'\'',
+            status: 'chaos started',
             mode: chaosMode,
             pool: pool
           }));
           return;
         }
-        
-        if (pathname === '\''/chaos/stop'\'' && req.method === '\''POST'\'') {
+
+        // Chaos stop endpoint
+        if (pathname === '/chaos/stop' && req.method === 'POST') {
           chaosMode = null;
           res.writeHead(200);
           res.end(JSON.stringify({ 
-            status: '\''chaos stopped'\'',
+            status: 'chaos stopped',
             pool: pool,
             duration: chaosStartTime ? new Date() - chaosStartTime : 0
           }));
           return;
         }
-        
+
+        // Default 404
         res.writeHead(404);
-        res.end(JSON.stringify({ error: '\''Not found'\'' }));
+        res.end(JSON.stringify({ error: 'Not found' }));
       });
-      
+
       server.listen(port, () => {
-        console.log(`Server running at http://localhost:${port} (${pool})`);
-      });' > /app/server.js &&
+        console.log('Server running at http://localhost:' + port + ' (' + pool + ')');
+      });
+      EOF
       node /app/server.js"
 
   alert_watcher:

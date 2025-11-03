@@ -22,30 +22,27 @@ class LogWatcher:
         print(f"🔍 Log Watcher Started")
         print(f"   - Error Threshold: {self.error_rate_threshold}%")
         print(f"   - Window Size: {self.window_size} requests")
-        print(f"   - Alert Cooldown: {self.alert_cooldown}s")
 
     def parse_log_line(self, line):
         try:
             # Parse Nginx log format
             pool_match = re.search(r'pool="([^"]*)"', line)
             status_match = re.search(r'" (\d{3}) ', line)
-            upstream_status_match = re.search(r'"(\d{3})"', line)
             
             if pool_match and status_match:
                 return {
                     'pool': pool_match.group(1),
                     'status': int(status_match.group(1)),
-                    'upstream_status': int(upstream_status_match.group(1)) if upstream_status_match else int(status_match.group(1)),
                     'timestamp': time.time()
                 }
-        except Exception as e:
-            print(f"⚠️ Parse error: {e}")
+        except Exception:
+            pass
         return None
 
     def calculate_error_rate(self):
         if not self.request_window:
             return 0
-        error_count = sum(1 for req in self.request_window if 500 <= req.get('upstream_status', 200) < 600)
+        error_count = sum(1 for req in self.request_window if 500 <= req.get('status', 200) < 600)
         return (error_count / len(self.request_window)) * 100
 
     def send_slack_alert(self, message):
@@ -88,71 +85,55 @@ class LogWatcher:
         
         print(f"📁 Looking for log file: {log_file}")
         
-        # Wait for log file with timeout
-        max_wait = 30
+        # Wait for log file
+        max_wait = 60
         waited = 0
         while not log_file.exists():
             if waited >= max_wait:
                 print(f"❌ Timeout: Log file not found after {max_wait}s")
                 return
             print("⏳ Waiting for log file...")
-            time.sleep(2)
-            waited += 2
+            time.sleep(5)
+            waited += 5
         
-        print(f"✅ Log file found: {log_file}")
+        print(f"✅ Log file found, starting to watch...")
         
-        try:
-            # Check if we can read the file
-            with open(log_file, 'r') as test_file:
-                print("✅ Log file is readable")
-        except PermissionError:
-            print(f"❌ Permission denied: Cannot read {log_file}")
-            print("💡 Try: docker-compose down && docker-compose up --build -d")
-            return
-        except Exception as e:
-            print(f"❌ Cannot open log file: {e}")
-            return
+        # Track file position manually
+        file_position = 0
         
-        # Start watching
-        print("👀 Starting to watch logs...")
-        with open(log_file, 'r') as file:
-            file.seek(0, 2)  # Go to end of file
-            
-            while True:
-                try:
-                    line = file.readline()
-                    if line:
+        while True:
+            try:
+                # Open file each time to avoid seeking issues
+                with open(log_file, 'r') as file:
+                    # Go to last known position
+                    if file_position > 0:
+                        file.seek(file_position)
+                    
+                    # Read new lines
+                    for line in file:
                         log_data = self.parse_log_line(line)
                         if log_data:
                             self.request_window.append(log_data)
                             self.check_failover(log_data['pool'])
-                            
-                            # Check error rate every 10 requests
-                            if len(self.request_window) % 10 == 0:
-                                self.check_error_rate()
-                            
-                            # Debug output
-                            if len(self.request_window) % 20 == 0:
-                                error_rate = self.calculate_error_rate()
-                                print(f"📊 Processed {len(self.request_window)} requests. Error rate: {error_rate:.1f}%")
                     
-                    time.sleep(0.1)
+                    # Update position
+                    file_position = file.tell()
                     
-                except KeyboardInterrupt:
-                    print("🛑 Stopped by user")
-                    break
-                except Exception as e:
-                    print(f"⚠️ Error reading logs: {e}")
-                    time.sleep(1)
+                # Check error rate periodically
+                if len(self.request_window) % 10 == 0:
+                    self.check_error_rate()
+                
+                # Debug output
+                if len(self.request_window) % 20 == 0:
+                    error_rate = self.calculate_error_rate()
+                    print(f"📊 Processed {len(self.request_window)} requests. Error rate: {error_rate:.1f}%")
+                
+                time.sleep(1)  # Check every second
+                
+            except Exception as e:
+                print(f"⚠️ Error reading logs: {e}")
+                time.sleep(5)
 
 if __name__ == '__main__':
-    print("=" * 50)
-    print("🔬 Blue/Green Log Watcher")
-    print("=" * 50)
-    
-    # Check environment
-    if not os.getenv('SLACK_WEBHOOK_URL'):
-        print("⚠️  SLACK_WEBHOOK_URL not set. Alerts will only print to console.")
-    
     watcher = LogWatcher()
     watcher.watch_logs()
