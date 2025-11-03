@@ -3,22 +3,22 @@ events {
 }
 
 http {
-    # Custom log format with all required fields
+    # Custom log format with all required Stage 3 fields
     log_format custom_log '[$time_local] "$request" $status '
                          '"$upstream_addr" "$upstream_status" '
                          'rt=$request_time urt=$upstream_response_time '
                          'pool="$upstream_http_x_app_pool" '
                          'release="$upstream_http_x_release_id"';
 
-    # Write to actual files, not stdout
     access_log /var/log/nginx/access.log custom_log;
-    error_log /var/log/nginx/error.log;
+    error_log /var/log/nginx/error.log warn;
 
     upstream app_backend {
         server app_blue:3000 max_fails=2 fail_timeout=5s;
         server app_green:3000 backup;
     }
 
+    # Main load balancer
     server {
         listen 80;
         
@@ -39,16 +39,20 @@ http {
         }
     }
 
+    # Direct access to Blue app
     server {
         listen 8081;
+        
         location / {
             proxy_pass http://app_blue:3000;
             proxy_set_header Host $host;
         }
     }
 
+    # Direct access to Green app
     server {
         listen 8082;
+        
         location / {
             proxy_pass http://app_green:3000;
             proxy_set_header Host $host;
