@@ -1,10 +1,10 @@
-version: '3.8'
-
 services:
   nginx:
     image: nginx:1.25
     ports:
       - "8080:80"
+      - "8081:8081"
+      - "8082:8082"
     volumes:
       - ./nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro
       - nginx-logs:/var/log/nginx
@@ -12,18 +12,21 @@ services:
       - ACTIVE_POOL=${ACTIVE_POOL:-blue}
       - NGINX_ENVSUBST_TEMPLATE_DIR=/etc/nginx/templates
       - NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx
-    command: ["/bin/sh", "-c", 
-        "envsubst '$$ACTIVE_POOL' < /etc/nginx/templates/nginx.conf.template > /etc/nginx/nginx.conf && 
-        # Remove symlinks and create real log files
-        rm -f /var/log/nginx/access.log /var/log/nginx/error.log &&
-        touch /var/log/nginx/access.log /var/log/nginx/error.log &&
-        chmod 666 /var/log/nginx/access.log /var/log/nginx/error.log &&
-        # Start nginx
-        nginx -g 'daemon off;'"]
+    entrypoint:
+      - /bin/sh
+      - -euxc
+      - |
+          if [ "${ACTIVE_POOL}" = "blue" ]; then
+            export BACKUP_POOL="green";
+          else
+            export BACKUP_POOL="blue";
+          fi
+          envsubst '$ACTIVE_POOL $BACKUP_POOL' < /etc/nginx/templates/nginx.conf.template > /etc/nginx/nginx.conf
+          nginx -g 'daemon off;'
     depends_on:
       - app_blue
       - app_green
-
+    restart: unless-stopped
   app_blue:
     image: ${BLUE_IMAGE:-node:18-alpine}
     expose:
