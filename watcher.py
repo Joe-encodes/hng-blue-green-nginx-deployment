@@ -19,11 +19,14 @@ class LogWatcher:
         
         self.slack_client = WebhookClient(self.slack_webhook) if self.slack_webhook else None
         
-        print(f"Log Watcher: threshold={self.error_rate_threshold}%, window={self.window_size}")
+        print(f"🔍 Log Watcher Started")
+        print(f"   - Error Threshold: {self.error_rate_threshold}%")
+        print(f"   - Window Size: {self.window_size} requests")
+        print(f"   - Alert Cooldown: {self.alert_cooldown}s")
 
     def parse_log_line(self, line):
         try:
-            # Parse Nginx log format: pool="blue" release="blue-v1.0.0" etc.
+            # Parse Nginx log format
             pool_match = re.search(r'pool="([^"]*)"', line)
             status_match = re.search(r'" (\d{3}) ', line)
             upstream_status_match = re.search(r'"(\d{3})"', line)
@@ -36,7 +39,7 @@ class LogWatcher:
                     'timestamp': time.time()
                 }
         except Exception as e:
-            print(f"Parse error: {e}")
+            print(f"⚠️ Parse error: {e}")
         return None
 
     def calculate_error_rate(self):
@@ -47,20 +50,21 @@ class LogWatcher:
 
     def send_slack_alert(self, message):
         if not self.slack_client:
-            print(f"SLACK: {message}")
+            print(f"📢 {message}")
             return
         
         try:
             response = self.slack_client.send(text=message)
-            print(f"Alert sent: {response.status_code}")
+            print(f"✅ Alert sent to Slack")
         except Exception as e:
-            print(f"Slack error: {e}")
+            print(f"❌ Slack error: {e}")
 
     def check_failover(self, current_pool):
         if current_pool and current_pool != self.last_pool:
             current_time = time.time()
             if current_time - self.last_failover_alert_time > self.alert_cooldown:
                 message = f"🔄 Failover detected: {self.last_pool} → {current_pool}"
+                print(f"🚨 {message}")
                 self.send_slack_alert(message)
                 self.last_failover_alert_time = current_time
             self.last_pool = current_pool
@@ -73,6 +77,7 @@ class LogWatcher:
             current_time = time.time()
             if current_time - self.last_alert_time > self.alert_cooldown:
                 message = f"❌ High error rate: {error_rate:.1f}% (threshold: {self.error_rate_threshold}%)"
+                print(f"🚨 {message}")
                 self.send_slack_alert(message)
                 self.last_alert_time = current_time
                 return True
@@ -81,24 +86,73 @@ class LogWatcher:
     def watch_logs(self):
         log_file = Path('/var/log/nginx/access.log')
         
-        while not log_file.exists():
-            print("Waiting for log file...")
-            time.sleep(2)
+        print(f"📁 Looking for log file: {log_file}")
         
+        # Wait for log file with timeout
+        max_wait = 30
+        waited = 0
+        while not log_file.exists():
+            if waited >= max_wait:
+                print(f"❌ Timeout: Log file not found after {max_wait}s")
+                return
+            print("⏳ Waiting for log file...")
+            time.sleep(2)
+            waited += 2
+        
+        print(f"✅ Log file found: {log_file}")
+        
+        try:
+            # Check if we can read the file
+            with open(log_file, 'r') as test_file:
+                print("✅ Log file is readable")
+        except PermissionError:
+            print(f"❌ Permission denied: Cannot read {log_file}")
+            print("💡 Try: docker-compose down && docker-compose up --build -d")
+            return
+        except Exception as e:
+            print(f"❌ Cannot open log file: {e}")
+            return
+        
+        # Start watching
+        print("👀 Starting to watch logs...")
         with open(log_file, 'r') as file:
+            file.seek(0, 2)  # Go to end of file
+            
             while True:
-                line = file.readline()
-                if line:
-                    log_data = self.parse_log_line(line)
-                    if log_data:
-                        self.request_window.append(log_data)
-                        self.check_failover(log_data['pool'])
-                        
-                        if len(self.request_window) % 10 == 0:
-                            self.check_error_rate()
-                
-                time.sleep(0.1)
+                try:
+                    line = file.readline()
+                    if line:
+                        log_data = self.parse_log_line(line)
+                        if log_data:
+                            self.request_window.append(log_data)
+                            self.check_failover(log_data['pool'])
+                            
+                            # Check error rate every 10 requests
+                            if len(self.request_window) % 10 == 0:
+                                self.check_error_rate()
+                            
+                            # Debug output
+                            if len(self.request_window) % 20 == 0:
+                                error_rate = self.calculate_error_rate()
+                                print(f"📊 Processed {len(self.request_window)} requests. Error rate: {error_rate:.1f}%")
+                    
+                    time.sleep(0.1)
+                    
+                except KeyboardInterrupt:
+                    print("🛑 Stopped by user")
+                    break
+                except Exception as e:
+                    print(f"⚠️ Error reading logs: {e}")
+                    time.sleep(1)
 
 if __name__ == '__main__':
+    print("=" * 50)
+    print("🔬 Blue/Green Log Watcher")
+    print("=" * 50)
+    
+    # Check environment
+    if not os.getenv('SLACK_WEBHOOK_URL'):
+        print("⚠️  SLACK_WEBHOOK_URL not set. Alerts will only print to console.")
+    
     watcher = LogWatcher()
     watcher.watch_logs()
