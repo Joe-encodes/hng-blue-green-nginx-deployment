@@ -4,7 +4,7 @@ services:
   nginx:
     image: nginx:1.25
     ports:
-      - "8080:80"    # Only main port for Nginx load balancer
+      - "8080:80"
     volumes:
       - ./nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro
       - nginx-logs:/var/log/nginx
@@ -24,40 +24,552 @@ services:
       retries: 3
 
   app_blue:
-    image: ${BLUE_IMAGE:-yimikaade/wonderful:devops-stage-two}
+    image: ${BLUE_IMAGE:-node:18-alpine}
     expose:
       - "3000"
     ports:
-      - "8081:3000"  # Direct access to Blue app
+      - "8081:3000"
     environment:
       - PORT=3000
       - APP_POOL=blue
       - RELEASE_ID=${RELEASE_ID_BLUE:-blue-v1.0.0}
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
-    restart: unless-stopped
+      - APP_NAME=Blue_Service
+      - DEPLOYMENT_ENV=production
+    command: >
+      sh -c "
+      npm install -g http-server &&
+      mkdir -p /app &&
+      cat > /app/package.json << 'EOF'
+      {
+        \"name\": \"blue-app\",
+        \"version\": \"${RELEASE_ID_BLUE:-blue-v1.0.0}\",
+        \"description\": \"Blue deployment service for Blue/Green deployment\",
+        \"main\": \"server.js\",
+        \"scripts\": {
+          \"start\": \"node server.js\",
+          \"health\": \"curl -f http://localhost:3000/healthz\"
+        }
+      }
+      EOF
+      &&
+      cat > /app/server.js << 'EOF'
+      const http = require('http');
+      const url = require('url');
+      const os = require('os');
+
+      const config = {
+        port: process.env.PORT || 3000,
+        pool: process.env.APP_POOL || 'blue',
+        releaseId: process.env.RELEASE_ID || 'unknown',
+        appName: process.env.APP_NAME || 'Unknown_Service',
+        env: process.env.DEPLOYMENT_ENV || 'development'
+      };
+
+      let chaosMode = null;
+      let chaosStartTime = null;
+      let requestCount = 0;
+      let errorCount = 0;
+
+      // Health status
+      let healthStatus = {
+        status: 'healthy',
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString(),
+        metrics: {
+          totalRequests: 0,
+          successfulRequests: 0,
+          errorRequests: 0,
+          chaosMode: false
+        }
+      };
+
+      function getSystemInfo() {
+        return {
+          hostname: os.hostname(),
+          platform: os.platform(),
+          arch: os.arch(),
+          memory: {
+            total: Math.round(os.totalmem() / (1024 * 1024)) + ' MB',
+            free: Math.round(os.freemem() / (1024 * 1024)) + ' MB',
+            usage: Math.round(((os.totalmem() - os.freemem()) / os.totalmem()) * 100) + '%'
+          },
+          uptime: Math.round(os.uptime()) + ' seconds',
+          loadAverage: os.loadavg()
+        };
+      }
+
+      function getServiceInfo() {
+        return {
+          service: {
+            name: config.appName,
+            pool: config.pool,
+            version: config.releaseId,
+            environment: config.env,
+            port: config.port,
+            nodeVersion: process.version,
+            uptime: Math.round(process.uptime()) + ' seconds'
+          },
+          deployment: {
+            strategy: 'Blue/Green',
+            status: chaosMode ? 'chaos_active' : 'stable',
+            chaosMode: chaosMode,
+            chaosDuration: chaosStartTime ? Math.round((Date.now() - chaosStartTime) / 1000) + ' seconds' : null
+          },
+          metrics: {
+            ...healthStatus.metrics,
+            requestRate: requestCount / Math.max(process.uptime(), 1),
+            errorRate: errorCount / Math.max(requestCount, 1)
+          }
+        };
+      }
+
+      function createResponse(statusCode, data, headers = {}) {
+        const response = {
+          success: statusCode >= 200 && statusCode < 300,
+          timestamp: new Date().toISOString(),
+          data: data
+        };
+
+        const defaultHeaders = {
+          'X-App-Pool': config.pool,
+          'X-Release-Id': config.releaseId,
+          'X-Service-Name': config.appName,
+          'X-Environment': config.env,
+          'Content-Type': 'application/json; charset=utf-8'
+        };
+
+        return {
+          statusCode,
+          headers: { ...defaultHeaders, ...headers },
+          body: JSON.stringify(response, null, 2)
+        };
+      }
+
+      const server = http.createServer((req, res) => {
+        requestCount++;
+        const parsedUrl = url.parse(req.url, true);
+        const pathname = parsedUrl.pathname;
+        const method = req.method;
+
+        console.log(\`[\${new Date().toISOString()}] \${method} \${pathname} - Pool: \${config.pool}\`);
+
+        // Chaos simulation
+        if (chaosMode === 'error') {
+          errorCount++;
+          healthStatus.metrics.errorRequests = errorCount;
+          const response = createResponse(500, {
+            error: 'Chaos mode active',
+            message: 'Service is simulating 500 errors for testing',
+            mode: chaosMode,
+            duration: chaosStartTime ? Math.round((Date.now() - chaosStartTime) / 1000) + ' seconds' : 'unknown'
+          });
+          res.writeHead(response.statusCode, response.headers);
+          res.end(response.body);
+          return;
+        }
+
+        if (chaosMode === 'timeout') {
+          // Simulate timeout - do not respond
+          console.log('Simulating timeout - request will hang');
+          return;
+        }
+
+        // Health endpoint
+        if (pathname === '/healthz' && method === 'GET') {
+          healthStatus.metrics.totalRequests = requestCount;
+          healthStatus.metrics.successfulRequests = requestCount - errorCount;
+          healthStatus.metrics.chaosMode = !!chaosMode;
+          healthStatus.uptime = process.uptime();
+          healthStatus.timestamp = new Date().toISOString();
+
+          const response = createResponse(200, {
+            status: 'healthy',
+            service: config.appName,
+            pool: config.pool,
+            version: config.releaseId,
+            uptime: Math.round(process.uptime()) + ' seconds',
+            checks: {
+              database: 'connected',
+              memory: 'stable',
+              chaos: chaosMode ? 'active' : 'inactive'
+            },
+            metrics: healthStatus.metrics
+          });
+          res.writeHead(response.statusCode, response.headers);
+          res.end(response.body);
+          return;
+        }
+
+        // Version endpoint
+        if (pathname === '/version' && method === 'GET') {
+          healthStatus.metrics.successfulRequests++;
+          const response = createResponse(200, {
+            service: getServiceInfo(),
+            system: getSystemInfo(),
+            deployment: {
+              type: 'Blue/Green Deployment',
+              current: config.pool,
+              release: config.releaseId,
+              status: chaosMode ? 'chaos_testing' : 'operational',
+              features: ['auto-failover', 'health-checks', 'chaos-engineering']
+            }
+          });
+          res.writeHead(response.statusCode, response.headers);
+          res.end(response.body);
+          return;
+        }
+
+        // Chaos start endpoint
+        if (pathname === '/chaos/start' && method === 'POST') {
+          chaosMode = parsedUrl.query.mode || 'error';
+          chaosStartTime = Date.now();
+          const response = createResponse(200, {
+            message: 'Chaos engineering mode activated',
+            mode: chaosMode,
+            pool: config.pool,
+            startTime: new Date(chaosStartTime).toISOString(),
+            expectedBehavior: chaosMode === 'error' ? 'Will return 500 errors' : 'Will simulate timeouts',
+            stopEndpoint: 'POST /chaos/stop'
+          });
+          res.writeHead(response.statusCode, response.headers);
+          res.end(response.body);
+          return;
+        }
+
+        // Chaos stop endpoint
+        if (pathname === '/chaos/stop' && method === 'POST') {
+          const duration = chaosStartTime ? Date.now() - chaosStartTime : 0;
+          chaosMode = null;
+          const response = createResponse(200, {
+            message: 'Chaos engineering mode deactivated',
+            pool: config.pool,
+            previousMode: chaosMode,
+            duration: Math.round(duration / 1000) + ' seconds',
+            affectedRequests: errorCount,
+            status: 'Service restored to normal operation'
+          });
+          chaosStartTime = null;
+          res.writeHead(response.statusCode, response.headers);
+          res.end(response.body);
+          return;
+        }
+
+        // Metrics endpoint
+        if (pathname === '/metrics' && method === 'GET') {
+          const response = createResponse(200, {
+            service: getServiceInfo(),
+            performance: {
+              totalRequests: requestCount,
+              successfulRequests: requestCount - errorCount,
+              errorRequests: errorCount,
+              successRate: ((requestCount - errorCount) / requestCount * 100).toFixed(2) + '%',
+              chaosInjected: chaosMode ? 'yes' : 'no'
+            }
+          });
+          res.writeHead(response.statusCode, response.headers);
+          res.end(response.body);
+          return;
+        }
+
+        // Default 404
+        const response = createResponse(404, {
+          error: 'Endpoint not found',
+          availableEndpoints: {
+            'GET /version': 'Service information and deployment details',
+            'GET /healthz': 'Health check with system status',
+            'GET /metrics': 'Performance metrics and statistics',
+            'POST /chaos/start?mode=error|timeout': 'Activate chaos engineering',
+            'POST /chaos/stop': 'Deactivate chaos engineering'
+          },
+          currentPool: config.pool,
+          release: config.releaseId
+        });
+        res.writeHead(response.statusCode, response.headers);
+        res.end(response.body);
+      });
+
+      server.listen(config.port, () => {
+        console.log(\`🚀 \${config.appName} server running at http://localhost:\${config.port}\`);
+        console.log(\`📊 Pool: \${config.pool} | Version: \${config.releaseId} | Environment: \${config.env}\`);
+        console.log(\`🔧 Endpoints: /version, /healthz, /metrics, /chaos/start, /chaos/stop\`);
+      });
+      EOF
+      &&
+      cd /app && node server.js"
 
   app_green:
-    image: ${GREEN_IMAGE:-yimikaade/wonderful:devops-stage-two}
+    image: ${GREEN_IMAGE:-node:18-alpine}
     expose:
       - "3000"
     ports:
-      - "8082:3000"  # Direct access to Green app
+      - "8082:3000"
     environment:
       - PORT=3000
       - APP_POOL=green
       - RELEASE_ID=${RELEASE_ID_GREEN:-green-v1.0.0}
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
-    restart: unless-stopped
+      - APP_NAME=Green_Service
+      - DEPLOYMENT_ENV=production
+    command: >
+      sh -c "
+      npm install -g http-server &&
+      mkdir -p /app &&
+      cat > /app/package.json << 'EOF'
+      {
+        \"name\": \"green-app\",
+        \"version\": \"${RELEASE_ID_GREEN:-green-v1.0.0}\",
+        \"description\": \"Green deployment service for Blue/Green deployment\",
+        \"main\": \"server.js\",
+        \"scripts\": {
+          \"start\": \"node server.js\",
+          \"health\": \"curl -f http://localhost:3000/healthz\"
+        }
+      }
+      EOF
+      &&
+      cat > /app/server.js << 'EOF'
+      const http = require('http');
+      const url = require('url');
+      const os = require('os');
+
+      const config = {
+        port: process.env.PORT || 3000,
+        pool: process.env.APP_POOL || 'green',
+        releaseId: process.env.RELEASE_ID || 'unknown',
+        appName: process.env.APP_NAME || 'Unknown_Service',
+        env: process.env.DEPLOYMENT_ENV || 'development'
+      };
+
+      let chaosMode = null;
+      let chaosStartTime = null;
+      let requestCount = 0;
+      let errorCount = 0;
+
+      // Health status
+      let healthStatus = {
+        status: 'healthy',
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString(),
+        metrics: {
+          totalRequests: 0,
+          successfulRequests: 0,
+          errorRequests: 0,
+          chaosMode: false
+        }
+      };
+
+      function getSystemInfo() {
+        return {
+          hostname: os.hostname(),
+          platform: os.platform(),
+          arch: os.arch(),
+          memory: {
+            total: Math.round(os.totalmem() / (1024 * 1024)) + ' MB',
+            free: Math.round(os.freemem() / (1024 * 1024)) + ' MB',
+            usage: Math.round(((os.totalmem() - os.freemem()) / os.totalmem()) * 100) + '%'
+          },
+          uptime: Math.round(os.uptime()) + ' seconds',
+          loadAverage: os.loadavg()
+        };
+      }
+
+      function getServiceInfo() {
+        return {
+          service: {
+            name: config.appName,
+            pool: config.pool,
+            version: config.releaseId,
+            environment: config.env,
+            port: config.port,
+            nodeVersion: process.version,
+            uptime: Math.round(process.uptime()) + ' seconds'
+          },
+          deployment: {
+            strategy: 'Blue/Green',
+            status: chaosMode ? 'chaos_active' : 'stable',
+            chaosMode: chaosMode,
+            chaosDuration: chaosStartTime ? Math.round((Date.now() - chaosStartTime) / 1000) + ' seconds' : null
+          },
+          metrics: {
+            ...healthStatus.metrics,
+            requestRate: requestCount / Math.max(process.uptime(), 1),
+            errorRate: errorCount / Math.max(requestCount, 1)
+          }
+        };
+      }
+
+      function createResponse(statusCode, data, headers = {}) {
+        const response = {
+          success: statusCode >= 200 && statusCode < 300,
+          timestamp: new Date().toISOString(),
+          data: data
+        };
+
+        const defaultHeaders = {
+          'X-App-Pool': config.pool,
+          'X-Release-Id': config.releaseId,
+          'X-Service-Name': config.appName,
+          'X-Environment': config.env,
+          'Content-Type': 'application/json; charset=utf-8'
+        };
+
+        return {
+          statusCode,
+          headers: { ...defaultHeaders, ...headers },
+          body: JSON.stringify(response, null, 2)
+        };
+      }
+
+      const server = http.createServer((req, res) => {
+        requestCount++;
+        const parsedUrl = url.parse(req.url, true);
+        const pathname = parsedUrl.pathname;
+        const method = req.method;
+
+        console.log(\`[\${new Date().toISOString()}] \${method} \${pathname} - Pool: \${config.pool}\`);
+
+        // Chaos simulation
+        if (chaosMode === 'error') {
+          errorCount++;
+          healthStatus.metrics.errorRequests = errorCount;
+          const response = createResponse(500, {
+            error: 'Chaos mode active',
+            message: 'Service is simulating 500 errors for testing',
+            mode: chaosMode,
+            duration: chaosStartTime ? Math.round((Date.now() - chaosStartTime) / 1000) + ' seconds' : 'unknown'
+          });
+          res.writeHead(response.statusCode, response.headers);
+          res.end(response.body);
+          return;
+        }
+
+        if (chaosMode === 'timeout') {
+          // Simulate timeout - do not respond
+          console.log('Simulating timeout - request will hang');
+          return;
+        }
+
+        // Health endpoint
+        if (pathname === '/healthz' && method === 'GET') {
+          healthStatus.metrics.totalRequests = requestCount;
+          healthStatus.metrics.successfulRequests = requestCount - errorCount;
+          healthStatus.metrics.chaosMode = !!chaosMode;
+          healthStatus.uptime = process.uptime();
+          healthStatus.timestamp = new Date().toISOString();
+
+          const response = createResponse(200, {
+            status: 'healthy',
+            service: config.appName,
+            pool: config.pool,
+            version: config.releaseId,
+            uptime: Math.round(process.uptime()) + ' seconds',
+            checks: {
+              database: 'connected',
+              memory: 'stable',
+              chaos: chaosMode ? 'active' : 'inactive'
+            },
+            metrics: healthStatus.metrics
+          });
+          res.writeHead(response.statusCode, response.headers);
+          res.end(response.body);
+          return;
+        }
+
+        // Version endpoint
+        if (pathname === '/version' && method === 'GET') {
+          healthStatus.metrics.successfulRequests++;
+          const response = createResponse(200, {
+            service: getServiceInfo(),
+            system: getSystemInfo(),
+            deployment: {
+              type: 'Blue/Green Deployment',
+              current: config.pool,
+              release: config.releaseId,
+              status: chaosMode ? 'chaos_testing' : 'operational',
+              features: ['auto-failover', 'health-checks', 'chaos-engineering']
+            }
+          });
+          res.writeHead(response.statusCode, response.headers);
+          res.end(response.body);
+          return;
+        }
+
+        // Chaos start endpoint
+        if (pathname === '/chaos/start' && method === 'POST') {
+          chaosMode = parsedUrl.query.mode || 'error';
+          chaosStartTime = Date.now();
+          const response = createResponse(200, {
+            message: 'Chaos engineering mode activated',
+            mode: chaosMode,
+            pool: config.pool,
+            startTime: new Date(chaosStartTime).toISOString(),
+            expectedBehavior: chaosMode === 'error' ? 'Will return 500 errors' : 'Will simulate timeouts',
+            stopEndpoint: 'POST /chaos/stop'
+          });
+          res.writeHead(response.statusCode, response.headers);
+          res.end(response.body);
+          return;
+        }
+
+        // Chaos stop endpoint
+        if (pathname === '/chaos/stop' && method === 'POST') {
+          const duration = chaosStartTime ? Date.now() - chaosStartTime : 0;
+          chaosMode = null;
+          const response = createResponse(200, {
+            message: 'Chaos engineering mode deactivated',
+            pool: config.pool,
+            previousMode: chaosMode,
+            duration: Math.round(duration / 1000) + ' seconds',
+            affectedRequests: errorCount,
+            status: 'Service restored to normal operation'
+          });
+          chaosStartTime = null;
+          res.writeHead(response.statusCode, response.headers);
+          res.end(response.body);
+          return;
+        }
+
+        // Metrics endpoint
+        if (pathname === '/metrics' && method === 'GET') {
+          const response = createResponse(200, {
+            service: getServiceInfo(),
+            performance: {
+              totalRequests: requestCount,
+              successfulRequests: requestCount - errorCount,
+              errorRequests: errorCount,
+              successRate: ((requestCount - errorCount) / requestCount * 100).toFixed(2) + '%',
+              chaosInjected: chaosMode ? 'yes' : 'no'
+            }
+          });
+          res.writeHead(response.statusCode, response.headers);
+          res.end(response.body);
+          return;
+        }
+
+        // Default 404
+        const response = createResponse(404, {
+          error: 'Endpoint not found',
+          availableEndpoints: {
+            'GET /version': 'Service information and deployment details',
+            'GET /healthz': 'Health check with system status',
+            'GET /metrics': 'Performance metrics and statistics',
+            'POST /chaos/start?mode=error|timeout': 'Activate chaos engineering',
+            'POST /chaos/stop': 'Deactivate chaos engineering'
+          },
+          currentPool: config.pool,
+          release: config.releaseId
+        });
+        res.writeHead(response.statusCode, response.headers);
+        res.end(response.body);
+      });
+
+      server.listen(config.port, () => {
+        console.log(\`🚀 \${config.appName} server running at http://localhost:\${config.port}\`);
+        console.log(\`📊 Pool: \${config.pool} | Version: \${config.releaseId} | Environment: \${config.env}\`);
+        console.log(\`🔧 Endpoints: /version, /healthz, /metrics, /chaos/start, /chaos/stop\`);
+      });
+      EOF
+      &&
+      cd /app && node server.js"
 
   alert_watcher:
     build: .
