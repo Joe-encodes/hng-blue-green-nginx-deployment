@@ -13,15 +13,13 @@ services:
       - NGINX_ENVSUBST_TEMPLATE_DIR=/etc/nginx/templates
       - NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx
     command: ["/bin/sh", "-c", 
-        "envsubst '$$ACTIVE_POOL' < /etc/nginx/templates/nginx.conf.template > /etc/nginx/nginx.conf && nginx -g 'daemon off;'"]
+        "envsubst '$$ACTIVE_POOL' < /etc/nginx/templates/nginx.conf.template > /etc/nginx/nginx.conf && 
+        # Create real log files
+        touch /var/log/nginx/access.log /var/log/nginx/error.log &&
+        # Start nginx in foreground
+        nginx -g 'daemon off;'"]
     depends_on:
-      - app_blue
-      - app_green
-    healthcheck:
-      test: ["CMD", "nginx", "-t"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      - nginx
 
   app_blue:
     image: ${BLUE_IMAGE:-node:18-alpine}
@@ -573,8 +571,13 @@ services:
 
   alert_watcher:
     build: .
+    volumes:
+      - nginx-logs:/var/log/nginx
     environment:
       - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - ERROR_RATE_THRESHOLD=${ERROR_RATE_THRESHOLD:-2}
+      - WINDOW_SIZE=${WINDOW_SIZE:-200}
+      - ALERT_COOLDOWN_SEC=${ALERT_COOLDOWN_SEC:-300}
       - ACTIVE_POOL=${ACTIVE_POOL:-blue}
     depends_on:
       - nginx
